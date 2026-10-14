@@ -6,20 +6,21 @@ A zero-cost, fully automated pipeline that syncs Garmin Connect telemetry data i
 
 ## Architecture & Orchestration
 
+```text
 [ Garmin Connect API ]
-│
-▼ (Cron Daily @ 4:00 AM)
+         │
+         ▼ (Cron Daily @ 4:00 AM)
 [ Proxmox Debian LXC ]
-├── garminsync.py (Incremental daily fetch & dynamic year-splitting)
-└── scp (Cross-platform SSH transport via forward slashes)
-│
-▼ (Network Transfer over Port 22)
-[ Windows PC (main computer) ]
-└── Obsidian Vault (C:/Users/[your_user]/Documents/YourVaultName/)
-│
-▼
+   ├── garminsync.py (Incremental daily fetch & dynamic year-splitting)
+   └── scp (Cross-platform SSH transport via forward slashes)
+         │
+         ▼ (Network Transfer over Port 22)
+[ Windows PC (192.168.50.91) ]
+   └── Obsidian Vault (C:/Users/chimc/Documents/YourVaultName/)
+         │
+         ▼
 [ Local AI / RAG Context ]
-
+```
 
 ### Component Overview
 1. **`garminsync_backlog.py`**: Run **once** manually to ingest historical Garmin data into a master year file (e.g., `2026-YTD-backlog.jsonl`).
@@ -35,41 +36,46 @@ Clone the repository into your working directory (e.g., `/root/fitness-sync/`):
 ```bash
 git clone <your-repo-url> /root/fitness-sync
 cd /root/fitness-sync
-Create and configure your .env file:
+```
 
-Bash
+Create and configure your `.env` file:
+```bash
 cp .env.example .env
 nano .env
 # Fill in your Garmin credentials
-2. Python Virtual Environment
-Set up dependencies inside a virtual environment:
+```
 
-Bash
+### 2. Python Virtual Environment
+Set up dependencies inside a virtual environment:
+```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-3. Windows SSH & Key Authentication (LXC to Windows)
-To allow passwordless scp transfers from the Debian LXC to the Windows target ([host_IP]):
+```
 
-Generate an SSH key on the LXC (ssh-keygen).
+### 3. Windows SSH & Key Authentication (LXC to Windows)
+To allow passwordless `scp` transfers from the Debian LXC to the Windows target (`192.168.50.91`):
+* Generate an SSH key on the LXC (`ssh-keygen`).
+* Copy the public key to the Windows Administrator OpenSSH authorized keys path:
+  `C:\ProgramData\ssh\administrators_authorized_keys`
+* Ensure strict permissions are applied using `icacls` on Windows so the OpenSSH service accepts the key.
 
-Copy the public key to the Windows Administrator OpenSSH authorized keys path:
-C:\ProgramData\ssh\administrators_authorized_keys
+---
 
-Ensure strict permissions are applied using icacls on Windows so the OpenSSH service accepts the key.
+## Automation (Cron Scheduling)
 
-Automation (Cron Scheduling)
 To run the pipeline automatically every day at 4:00 AM, open your crontab on the LXC:
-
-Bash
+```bash
 crontab -e
-Add the following cron job (replace YourVaultName with your actual Obsidian vault directory name):
+```
 
-Bash
-0 4 * * * /root/fitness-sync/.venv/bin/python /root/fitness-sync/garminsync.py && YR=$(date +\%Y) && scp -v /root/fitness-sync/output/${YR}-YTD-backlog.jsonl user@host_IP:"C:/Users/user/Documents/YourVaultName/" >> /root/fitness-sync/output/cron.log 2>&1
+Add the following cron job (replace `YourVaultName` with your actual Obsidian vault directory name):
+```bash
+0 4 * * * /root/fitness-sync/.venv/bin/python /root/fitness-sync/garminsync.py && YR=$(date +\%Y) && scp -v /root/fitness-sync/output/${YR}-YTD-backlog.jsonl chimc@192.168.50.91:"C:/Users/chimc/Documents/YourVaultName/" >> /root/fitness-sync/output/cron.log 2>&1
+```
 
-# Checking Logs
+### Checking Logs
 To verify execution history and troubleshoot transfers:
-
-Bash
+```bash
 cat /root/fitness-sync/output/cron.log
+```
