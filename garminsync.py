@@ -30,22 +30,26 @@ def sync_daily_activity():
     client = Garmin(email, password)
     client.login(token_dir)
 
-    # Local timezone date enforcement with a 1-day lookback window
-    tz = ZoneInfo("America/Chicago")
+    # Local timezone date enforcement with a multi-day lookback window. Dedup by activity_id
+    # makes the overlap harmless, and it lets missed runs or late watch syncs catch up.
+    lookback_days = int(os.getenv("LOOKBACK_DAYS", "14"))
+    # TIMEZONE from .env (e.g. "America/New_York"); falls back to the machine's local timezone
+    tz_name = os.getenv("TIMEZONE")
+    tz = ZoneInfo(tz_name) if tz_name else None
     now_local = datetime.now(tz)
     today_str = now_local.date().isoformat()
-    yesterday_str = (now_local.date() - timedelta(days=1)).isoformat()
+    start_str = (now_local.date() - timedelta(days=lookback_days)).isoformat()
 
-    logging.info(f"Checking Garmin activities from {yesterday_str} to {today_str}...")
+    logging.info(f"Checking Garmin activities from {start_str} to {today_str} ({lookback_days}-day lookback)...")
 
     try:
-        activities = client.get_activities_by_date(yesterday_str, today_str, "")
+        activities = client.get_activities_by_date(start_str, today_str, "")
     except Exception as e:
-        logging.error(f"Error fetching activities for range {yesterday_str} to {today_str}: {e}")
+        logging.error(f"Error fetching activities for range {start_str} to {today_str}: {e}")
         return
 
     if not activities:
-        logging.info(f"No activities recorded for today ({today_str}) or yesterday.")
+        logging.info(f"No activities recorded from {start_str} to {today_str}.")
         return
 
     # Group new activities by their target year file to handle year-boundary edge cases safely
@@ -180,9 +184,12 @@ def sync_daily_activity():
     for path, data in activities_by_year.items():
         if data["new_count"] > 0:
             data["records"].sort(key=lambda x: x["date"])
-            with open(path, "w") as f:
+            # Write to a temp file and swap it in atomically so push.sh never copies a half-written file
+            tmp_path = path + ".tmp"
+            with open(tmp_path, "w") as f:
                 for rec in data["records"]:
                     f.write(json.dumps(rec) + "\n")
+            os.replace(tmp_path, path)
             logging.info(f"Successfully sorted and rewrote {path} with {data['new_count']} new activity(ies).")
 
 if __name__ == "__main__":

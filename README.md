@@ -11,12 +11,12 @@ A zero-cost, fully automated pipeline that syncs Garmin Connect telemetry data i
          │
          ▼ (Cron Daily @ 4:00 AM)
 [ Proxmox Debian LXC ]
-   ├── garminsync.py (Incremental daily fetch & dynamic year-splitting)
-   └── scp (Cross-platform SSH transport via forward slashes)
+   ├── garminsync.py (14-day lookback fetch, dedup & dynamic year-splitting)
+   └── push.sh (Cron every 30 min; scp only when changed, retries if PC is off)
          │
          ▼ (Network Transfer over Port 22)
-[ Windows PC (192.168.50.91) ]
-   └── Obsidian Vault (C:/Users/chimc/Documents/YourVaultName/)
+[ Windows PC (PUSH_HOST) ]
+   └── Obsidian Vault (C:/Users/<you>/Documents/YourVaultName/)
          │
          ▼
 [ Local AI / RAG Context ]
@@ -25,7 +25,7 @@ A zero-cost, fully automated pipeline that syncs Garmin Connect telemetry data i
 ### Component Overview
 1. **`garminsync_backlog.py`**: Run **once** manually to ingest historical Garmin data into a master year file (e.g., `2026-YTD-backlog.jsonl`).
 2. **`garminsync.py`**: Runs daily to fetch recent activities, handle year-boundary edge cases, prevent duplicate entries using `activity_id`, and write cleanly sorted JSON Lines.
-3. **Automated Cron & SCP**: Evaluates the current year dynamically (`$(date +%Y)`) and pushes the updated file straight to the target Windows Obsidian vault folder.
+3. **`push.sh`**: Pushes all year files to the target Windows Obsidian vault folder whenever they've changed, retrying every 30 minutes until the PC is reachable.
 
 ---
 
@@ -54,7 +54,7 @@ pip install -r requirements.txt
 ```
 
 ### 3. Windows SSH & Key Authentication (LXC to Windows)
-To allow passwordless `scp` transfers from the Debian LXC to the Windows target (`192.168.50.91`):
+To allow passwordless `scp` transfers from the Debian LXC to the Windows target (`PUSH_HOST` in `.env`):
 * Generate an SSH key on the LXC (`ssh-keygen`).
 * Copy the public key to the Windows Administrator OpenSSH authorized keys path:
   `C:\ProgramData\ssh\administrators_authorized_keys`
@@ -64,15 +64,23 @@ To allow passwordless `scp` transfers from the Debian LXC to the Windows target 
 
 ## Automation (Cron Scheduling)
 
-To run the pipeline automatically every day at 4:00 AM, open your crontab on the LXC:
+Fetching and pushing are two separate jobs, so the Windows PC doesn't need to be on at 4:00 AM:
+
+* **Fetch (daily, 4:00 AM):** `garminsync.py` looks back `LOOKBACK_DAYS` days (default 14, can be set in `.env`). The `activity_id` dedup means missed runs and late watch syncs are caught on the next run without creating duplicates.
+* **Push (every 30 min):** `push.sh` copies every `output/*.jsonl` file to the vault, but only if something changed since the last successful push. If the PC is off, it logs one line and tries again on the next run.
+
+Set `PUSH_USER`, `PUSH_HOST` and `PUSH_DEST` in `.env` (see `.env.example`), make the script executable with `chmod +x push.sh`, then open your crontab on the LXC:
 ```bash
 crontab -e
 ```
 
-Add the following cron job (replace `YourVaultName` with your actual Obsidian vault directory name):
+Add:
 ```bash
-0 4 * * * /root/fitness-sync/.venv/bin/python /root/fitness-sync/garminsync.py && YR=$(date +\%Y) && scp -v /root/fitness-sync/output/${YR}-YTD-backlog.jsonl chimc@192.168.50.91:"C:/Users/chimc/Documents/YourVaultName/" >> /root/fitness-sync/output/cron.log 2>&1
+0 4 * * * /root/fitness-sync/.venv/bin/python /root/fitness-sync/garminsync.py >> /root/fitness-sync/output/cron.log 2>&1
+*/30 * * * * /root/fitness-sync/push.sh >> /root/fitness-sync/output/cron.log 2>&1
 ```
+
+> **Note:** cron treats an unescaped `%` as a newline. If you add commands like `date +%Y` to a crontab line, write them as `date +\%Y`.
 
 ### Checking Logs
 To verify execution history and troubleshoot transfers:
