@@ -90,6 +90,8 @@ Both are written to `output/`, one file per year, one JSON object per line, with
 * **`{year}-YTD-backlog.jsonl`**: one line per activity.
 * **`{year}-daily-wellness.jsonl`**: one line per day. Sleep is the night that ended on that date. Training status and load are end-of-day values, so they include that day's workouts.
 
+> **Training load:** Garmin's chronic load can stop updating while acute load keeps changing (it stayed at 137 from Aug 18 to Oct 21, 2026), which also freezes Garmin's ratio and "Optimal" label. So `training_load.chronic_estimated` is computed from Garmin's acute load as a 28-day exponentially weighted average, along with the ratio, status (Low < 0.8 ≤ Optimal ≤ 1.5 < High) and optimal acute range. Garmin's own values are kept under `garmin_reported`, with `chronic_unchanged_since` showing when they went stale. Estimates start once there are 28 days of history.
+
 ### Checking Logs
 To verify execution history and troubleshoot transfers:
 ```bash

@@ -8,6 +8,12 @@ from records import safe_round, _try, METERS_PER_MILE
 from store import activities_path, wellness_path, read_jsonl, write_jsonl
 
 
+# Chronic training load = exponentially weighted average of acute load over this many days (see _add_load_estimates)
+CHRONIC_LOAD_DAYS = 28
+# Garmin's optimal acute:chronic band; its reported "optimal range" is exactly 0.8x-1.5x chronic load
+ACWR_OPTIMAL = (0.8, 1.5)
+
+
 def _phrase(code):
     """Garmin feedback codes like "PRODUCTIVE_5" or "AEROBIC_HIGH_SHORTAGE" -> "Productive" / "Aerobic High Shortage"."""
     if not code or code == "NONE":
@@ -56,13 +62,14 @@ def _training_status(ts):
         "vo2_max_date": vo2.get("calendarDate"),
         "training_status": _phrase(status.get("trainingStatusFeedbackPhrase")),
         "training_status_date": status.get("calendarDate"),
+        # chronic, ratio and status are filled in by _add_load_estimates once all days are known
         "training_load": {
             "acute": load.get("dailyTrainingLoadAcute"),
-            "chronic": load.get("dailyTrainingLoadChronic"),
-            "chronic_optimal_range": [safe_round(load["minTrainingLoadChronic"], 1), safe_round(load["maxTrainingLoadChronic"], 1)]
-            if load.get("minTrainingLoadChronic") is not None else None,
-            "acute_chronic_ratio": load.get("dailyAcuteChronicWorkloadRatio"),
-            "ratio_status": _phrase(load.get("acwrStatus")),
+            "garmin_reported": {
+                "chronic": load.get("dailyTrainingLoadChronic"),
+                "acute_chronic_ratio": load.get("dailyAcuteChronicWorkloadRatio"),
+                "ratio_status": _phrase(load.get("acwrStatus")),
+            },
         } if load else None,
         "load_balance": {
             "aerobic_low": monthly("AerobicLow"),
@@ -210,6 +217,56 @@ def build_daily_wellness(client, date_str):
     }
 
 
+def _ratio_status(ratio):
+    if ratio is None:
+        return None
+    if ratio < ACWR_OPTIMAL[0]:
+        return "Low"
+    return "Optimal" if ratio <= ACWR_OPTIMAL[1] else "High"
+
+
+def _add_load_estimates(records, history=()):
+    """Estimate chronic load ourselves instead of trusting Garmin's.
+
+    Garmin's chronic load sometimes stops updating (it sat at 137 from Aug 18 to Oct 21, 2026) while
+    acute load keeps updating, which also freezes Garmin's ratio and "Optimal" label. Chronic load
+    behaves like a CHRONIC_LOAD_DAYS-day exponentially weighted average of acute load: computed from
+    Garmin's acute values it matched Garmin's chronic to within ~6 points while Garmin's was still live.
+    `history` is earlier days (e.g. last year's file) used only to warm up the average.
+    """
+    alpha = 2 / (CHRONIC_LOAD_DAYS + 1)
+    avg = None
+    days_of_history = 0
+    last_acute = None
+    garmin_prev, garmin_since = None, None
+    for rec in list(history) + list(records):
+        tl = rec.get("training_load")
+        acute = tl.get("acute") if tl else None
+        # Days without a reading carry the last acute value forward
+        if acute is not None:
+            last_acute = acute
+        if last_acute is not None:
+            avg = last_acute if avg is None else avg + alpha * (last_acute - avg)
+            days_of_history += 1
+        if not tl:
+            continue
+
+        garmin = tl.get("garmin_reported") or {}
+        if garmin.get("chronic") != garmin_prev:
+            garmin_prev, garmin_since = garmin.get("chronic"), rec["date"]
+        garmin["chronic_unchanged_since"] = garmin_since
+
+        # Not enough history yet for a meaningful average
+        chronic = round(avg) if avg is not None and days_of_history >= CHRONIC_LOAD_DAYS else None
+        ratio = round(acute / chronic, 2) if chronic and acute is not None else None
+        tl["chronic_estimated"] = chronic
+        tl["acute_chronic_ratio_estimated"] = ratio
+        tl["ratio_status_estimated"] = _ratio_status(ratio)
+        tl["optimal_acute_range"] = [round(chronic * ACWR_OPTIMAL[0]), round(chronic * ACWR_OPTIMAL[1])] if chronic else None
+        # Keep the Garmin values last so a reader sees the estimates first
+        tl["garmin_reported"] = tl.pop("garmin_reported", garmin)
+
+
 def sync_wellness(client, start, end):
     """Rebuild wellness lines for every date from start to end (inclusive) and merge them into the year files."""
     by_year = {}
@@ -237,5 +294,7 @@ def sync_wellness(client, start, end):
         for date_str, rec in merged.items():
             rec["workouts"] = workouts.get(date_str, [])
 
-        write_jsonl(path, [merged[d] for d in sorted(merged)])
+        ordered = [merged[d] for d in sorted(merged)]
+        _add_load_estimates(ordered, history=read_jsonl(wellness_path(year - 1)))
+        write_jsonl(path, ordered)
         logging.info(f"Wrote {len(new_records)} day(s) of wellness data to {path} ({len(merged)} days total)")
