@@ -11,7 +11,7 @@ A zero-cost, fully automated pipeline that syncs Garmin Connect telemetry data i
          │
          ▼ (Cron Daily @ 4:00 AM)
 [ Proxmox Debian LXC ]
-   ├── garminsync.py (14-day lookback fetch, dedup & dynamic year-splitting)
+   ├── garminsync.py (7-day lookback fetch, dedup & dynamic year-splitting)
    └── push.sh (Cron every 30 min; scp only when changed, retries if PC is off)
          │
          ▼ (Network Transfer over Port 22)
@@ -23,9 +23,12 @@ A zero-cost, fully automated pipeline that syncs Garmin Connect telemetry data i
 ```
 
 ### Component Overview
-1. **`garminsync_backlog.py`**: Run **once** manually to ingest historical Garmin data into a master year file (e.g., `2026-YTD-backlog.jsonl`).
-2. **`garminsync.py`**: Runs daily to fetch recent activities, handle year-boundary edge cases, prevent duplicate entries using `activity_id`, and write cleanly sorted JSON Lines.
-3. **`push.sh`**: Pushes all year files to the target Windows Obsidian vault folder whenever they've changed, retrying every 30 minutes until the PC is reachable.
+1. **`garminsync_backlog.py`**: Run **once** manually to ingest the current year's history: every activity, plus daily wellness for every day since Jan 1.
+2. **`garminsync.py`**: Runs daily. Fetches new activities from the lookback window (deduplicated by `activity_id`), then refreshes daily wellness for the same window up to yesterday.
+3. **`records.py`**: Builds one activity record. Besides the basics and per-lap pace, HR, cadence and stride, each record includes HR time-in-zones (with Garmin's bpm boundaries), a run/walk interval breakdown (each run with its peak HR, each recovery walk with the HR it dropped to, separate from any warm-up or cool-down walk, plus Performance Condition), per-lap power and running dynamics, avg/moving pace and total ascent/descent, self-evaluation (feel and perceived effort), primary benefit, intensity minutes, Body Battery impact and stamina.
+4. **`wellness.py`**: Builds one record per calendar day, rest days included: sleep (times, score, stages vs Garmin's optimal ranges, SpO2, respiration), HRV vs baseline, resting HR, Body Battery, stress, steps and movement, training readiness and its factors, VO2 max, training status, acute vs chronic load and monthly load balance. Each day lists its workouts by `activity_id`.
+5. **`store.py`**: Reads and writes the JSONL files (compact JSON, atomic writes).
+6. **`push.sh`**: Pushes all year files to the target Windows Obsidian vault folder whenever they've changed, retrying every 30 minutes until the PC is reachable.
 
 ---
 
@@ -66,7 +69,7 @@ To allow passwordless `scp` transfers from the Debian LXC to the Windows target 
 
 Fetching and pushing are two separate jobs, so the Windows PC doesn't need to be on at 4:00 AM:
 
-* **Fetch (daily, 4:00 AM):** `garminsync.py` looks back `LOOKBACK_DAYS` days (default 14, can be set in `.env`). The `activity_id` dedup means missed runs and late watch syncs are caught on the next run without creating duplicates.
+* **Fetch (daily, 4:00 AM):** `garminsync.py` looks back `LOOKBACK_DAYS` days (default 7, can be set in `.env`). The `activity_id` dedup means missed runs and late watch syncs are caught on the next run without creating duplicates.
 * **Push (every 30 min):** `push.sh` copies every `output/*.jsonl` file to the vault, but only if something changed since the last successful push. If the PC is off, it logs one line and tries again on the next run.
 
 Set `PUSH_USER`, `PUSH_HOST` and `PUSH_DEST` in `.env` (see `.env.example`), make the script executable with `chmod +x push.sh`, then open your crontab on the LXC:
@@ -81,6 +84,11 @@ Add:
 ```
 
 > **Note:** cron treats an unescaped `%` as a newline. If you add commands like `date +%Y` to a crontab line, write them as `date +\%Y`.
+
+### Output Files
+Both are written to `output/`, one file per year, one JSON object per line, with `null` for values Garmin doesn't have:
+* **`{year}-YTD-backlog.jsonl`**: one line per activity.
+* **`{year}-daily-wellness.jsonl`**: one line per day. Sleep is the night that ended on that date. Training status and load are end-of-day values, so they include that day's workouts.
 
 ### Checking Logs
 To verify execution history and troubleshoot transfers:
